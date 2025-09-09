@@ -1,0 +1,94 @@
+อยากให้ “ถอดได้แล้วยังรัน” ชัวร์กว่านี้? (เพิ่ม Safe Mode)
+
+ถ้าบี๋อยากชัวร์ในพรีเซนต์ว่า “เอาฟังก์ชันหนึ่งออก ระบบยังวิ่ง” เค้าเตรียม โหมด fallback ให้เปิดได้ง่าย ๆ โดยไม่เปลี่ยนสถาปัตยกรรม:
+
+วาง “สวิตช์” ไว้บนไฟล์ (ใต้โค้ด ADMIN_PASSWORD_DEFAULT):
+
+# --- Safe Mode toggles (optional) ---
+SAFE_EXACT_ONLY = False   # True => รับเฉพาะ "จ่ายพอดี" ไม่มีเงินทอน (รันได้แม้ระบบทอนไม่พร้อม)
+SAFE_NO_ADMIN   = False   # True => ข้ามถามรหัสผ่านสำหรับ Maintenance / Shutdown
+
+
+ใส่เงื่อนไขใน process_payment() เพื่อรองรับ exact-only:
+
+def process_payment(self, price: int, cash_in: Dict[int,int]) -> Tuple[bool, Optional[Dict[int,int]], str]:
+    total_in = 0
+    for d, c in cash_in.items():
+        if d not in ALLOWED_DENOMS or c < 0:
+            return False, None, "other"
+        total_in += d * c
+
+    if total_in < price:
+        return False, None, "insufficient"
+
+    change = total_in - price
+
+    # >>> Safe mode: ไม่จ่ายเงินทอน
+    if SAFE_EXACT_ONLY and change != 0:
+        return False, None, "exact_only"
+
+    if not SAFE_EXACT_ONLY:
+        if not self.wallet.can_make_change(change):
+            return False, None, "no_change"
+        self.wallet.deposit(cash_in)
+        change_pack = self.wallet.make_change(change) or {}
+    else:
+        # exact payment เท่านั้น: รับเงินเข้าตู้ แต่ไม่จ่ายทอน
+        self.wallet.deposit(cash_in)
+        change_pack = {}
+
+    return True, change_pack, ""
+
+
+ให้ข้อความฝั่ง UI เข้าใจง่าย (ใน cli_buy() ตอนแสดงสาเหตุ fail):
+
+else:
+    if reason == "exact_only":
+        print("Exact payment only (safe mode). Refunding your cash...")
+    elif reason == "no_change":
+        print("Cannot provide change. Refunding your cash...")
+    elif reason == "insufficient":
+        print("Not enough money. Refunding...")
+    else:
+        print("Transaction failed. Refunding...")
+
+
+ข้ามถามรหัสผ่านได้ (ถ้าต้องการโชว์เร็ว ๆ)
+ใน cli_maintenance() / cli_shutdown() แทนที่จะถามรหัสเสมอ ให้ใส่:
+
+def cli_shutdown(vm: VendingMachine) -> bool:
+    if not SAFE_NO_ADMIN:
+        pwd = read_line("Enter admin password: ").strip()
+        if not vm.login_admin(pwd):
+            print("Wrong password.")
+            return False
+    vm.shutdown()
+    return True
+
+
+แบบนี้ถึง “โหมดแอดมินไม่พร้อม/ไม่มีคนจำรหัส” ก็ยังเดโมระบบได้
+
+(ทางเลือก) “กระเป๋าเงินจำลอง” หากอยากโชว์ว่าไม่มีระบบทอนเลยก็ยังรัน:
+
+class NullWallet(Wallet):
+    def __init__(self): super().__init__()
+    def can_make_change(self, amt: int) -> bool: return amt == 0
+    def make_change(self, amt: int): return {} if amt == 0 else None
+
+
+แล้วใน VendingMachine.__init__:
+
+self.wallet = NullWallet() if SAFE_EXACT_ONLY else Wallet()
+
+จะอธิบายตอนพรีเซนต์ยังไงให้ชัด (สคริปต์สั้น ๆ)
+
+“เราออกแบบเป็น 3 ชั้น: ข้อมูลสินค้า (Product), กระเป๋าเงิน/ทอน (Wallet), ตรรกะเครื่อง (VendingMachine)
+เวลาเกิดเหตุขัดข้อง ระบบ ไม่พัง แต่ ลดระดับการทำงาน (graceful degradation) เช่น ทอนไม่ได้ → ไม่รับเงิน/คืนเงิน, ไฟล์หาย → สร้างค่าเริ่มต้น”
+
+“มี Safe Mode ให้สาธิตได้ว่าถ้าถอดฟีเจอร์ ‘ทอน’ ออก ระบบยังรันต่อได้ด้วยโหมด exact payment only”
+
+“ตัดสต็อกเฉพาะเมื่อธุรกรรมสำเร็จ → ป้องกัน ‘กินเงิน/หายของ’ ”
+
+“อ่านไฟล์แบบ tolerant: ข้ามบรรทัดเสีย, ไม่มีไฟล์ → สร้างตัวอย่าง”
+
+“เมนเทนแนนซ์/ชัตดาวน์ล็อกด้วยรหัส (ปิดได้ด้วยสวิตช์ SAFE_NO_ADMIN สำหรับเดโม)”
